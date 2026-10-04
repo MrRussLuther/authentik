@@ -31,6 +31,12 @@ import { customElement, state } from "lit/decorators.js";
 // account and hand the resulting link to a victim (login CSRF).
 const PLEX_PIN_KEY = "authentik-plex-pin";
 const PLEX_ATTEMPT_KEY = "authentik-plex-attempt";
+// Query parameter appended to the forwardUrl handed to Plex. A stored pin only
+// counts as a return from Plex when the page was loaded with it: a pin left
+// behind by an attempt the user walked away from (Back button, an expired
+// Plex page, a hand-typed URL) is stale, and must not turn the next fresh
+// sign-in into "cancelled or timed out".
+const PLEX_RETURN_PARAM = "plex_return";
 // After this many automatic redirects without a completed sign-in, stop
 // redirecting so a broken return path cannot loop, and leave the manual
 // button as the way in.
@@ -64,6 +70,27 @@ function removeSessionItem(key: string): void {
     }
 }
 
+function isPlexReturn(): boolean {
+    return new URLSearchParams(window.location.search).has(PLEX_RETURN_PARAM);
+}
+
+// Drop the marker from the address bar once it has been read, so it neither
+// rides along on the flow executor's requests nor makes a later visit to this
+// history entry look like another return.
+function clearPlexReturnMarker(): void {
+    const url = new URL(window.location.href);
+
+    if (!url.searchParams.has(PLEX_RETURN_PARAM)) return;
+
+    url.searchParams.delete(PLEX_RETURN_PARAM);
+
+    try {
+        window.history.replaceState(window.history.state, "", url);
+    } catch {
+        // The marker is only a hint; leaving it in place is harmless.
+    }
+}
+
 function readAttempt(): number {
     return parseInt(readSessionItem(PLEX_ATTEMPT_KEY) ?? "", 10) || 0;
 }
@@ -90,16 +117,23 @@ export class PlexLoginInit extends BaseStage<
     }
 
     async firstUpdated(): Promise<void> {
-        const returnedPin = parseInt(readSessionItem(PLEX_PIN_KEY) ?? "", 10);
+        const storedPin = parseInt(readSessionItem(PLEX_PIN_KEY) ?? "", 10);
+        const returned = isPlexReturn();
+
+        clearPlexReturnMarker();
 
         // Return leg: Plex sent the browser back here through forwardUrl, and
         // the pin this session left with is waiting in sessionStorage.
-        if (!Number.isNaN(returnedPin)) {
+        if (returned && !Number.isNaN(storedPin)) {
             removeSessionItem(PLEX_PIN_KEY);
-            await this.completeReturn(returnedPin);
+            await this.completeReturn(storedPin);
 
             return;
         }
+
+        // A pin without a return marker was left by an attempt that never came
+        // back. Forget it and start over.
+        removeSessionItem(PLEX_PIN_KEY);
 
         if (readAttempt() >= MAX_REDIRECT_ATTEMPTS) {
             this.capped = true;
@@ -164,7 +198,11 @@ export class PlexLoginInit extends BaseStage<
         // The return URL keeps the flow's whole query string: dropping `next`
         // would complete the flow but lose the final hop back to the
         // application that started it.
-        const returnUrl = `${window.location.origin}${window.location.pathname}${window.location.search}`;
+        const returnParams = new URLSearchParams(window.location.search);
+
+        returnParams.set(PLEX_RETURN_PARAM, "1");
+
+        const returnUrl = `${window.location.origin}${window.location.pathname}?${returnParams}`;
         const authUrl = PlexAPIClient.authUrl(this.clientId, authInfo.pin.code, returnUrl);
 
         if (!writeSessionItem(PLEX_PIN_KEY, authInfo.pin.id.toString())) {
