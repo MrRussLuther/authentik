@@ -63,7 +63,13 @@ function stubBackend({ pinStatus = {}, redeem }: PlexBackend = {}): void {
     });
 }
 
-async function mountStage(host?: { challenge?: unknown }): Promise<PlexLoginInit> {
+// Mounts the stage and waits until it has either navigated, shown an error, or
+// satisfied `until`. `firstUpdated` is async and its work outlives
+// `updateComplete`.
+async function mountStage(
+    host?: { challenge?: unknown },
+    until: () => unknown = () => navigations.length > 0,
+): Promise<PlexLoginInit> {
     const element = document.createElement("ak-flow-source-plex");
 
     element.challenge = {
@@ -79,10 +85,9 @@ async function mountStage(host?: { challenge?: unknown }): Promise<PlexLoginInit
     mounted.push(element);
     document.body.append(element);
 
-    // `firstUpdated` is async and its work outlives `updateComplete`.
     await element.updateComplete;
 
-    await vi.waitFor(() => expect(navigations.length > 0 || element.errorMessage).toBeTruthy(), {
+    await vi.waitFor(() => expect(until() || element.errorMessage).toBeTruthy(), {
         timeout: 1000,
     });
 
@@ -167,6 +172,43 @@ describe("ak-flow-source-plex", () => {
         expect(navigations).toEqual([`${window.location.origin}/if/flow/default-source-auth/`]);
         expect(window.sessionStorage.getItem(PIN_KEY)).toBeNull();
         expect(window.location.search).toBe("?next=%2Fapp%2F");
+    });
+
+    it("hands a non-redirect challenge to the flow executor instead of navigating to it", async () => {
+        // Access denied and similar outcomes answer 200 with a challenge that
+        // has no `to`. Navigating to it ends up at `/undefined`.
+        const denied = { component: "xak-flow-shell", body: "<p>Access denied</p>" };
+
+        stubBackend({
+            pinStatus: { "1000": { authToken: "plex-token" } },
+            redeem: denied,
+        });
+
+        window.history.replaceState(null, "", "/if/flow/plex-login/?plex_return=1");
+        window.sessionStorage.setItem(PIN_KEY, "1000");
+
+        const host: { challenge?: unknown } = {};
+
+        const element = await mountStage(host, () => host.challenge || navigations.length);
+
+        expect(navigations).toEqual([]);
+        expect(host.challenge).toMatchObject(denied);
+        expect(element.errorMessage).toBeUndefined();
+    });
+
+    it("shows the retry state for a non-redirect challenge when there is no flow executor", async () => {
+        stubBackend({
+            pinStatus: { "1000": { authToken: "plex-token" } },
+            redeem: { component: "xak-flow-shell", body: "<p>Access denied</p>" },
+        });
+
+        window.history.replaceState(null, "", "/if/flow/plex-login/?plex_return=1");
+        window.sessionStorage.setItem(PIN_KEY, "1000");
+
+        const element = await mountStage();
+
+        expect(navigations).toEqual([]);
+        expect(element.errorMessage).toBeDefined();
     });
 
     it("reports a cancelled sign-in when it is a genuine return without a token", async () => {

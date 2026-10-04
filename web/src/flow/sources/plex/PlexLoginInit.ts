@@ -15,6 +15,7 @@ import { showAPIErrorMessage } from "#elements/messages/MessageContainer";
 import { BaseStage } from "#flow/stages/base";
 
 import {
+    ChallengeTypesFromJSON,
     PlexAuthenticationChallenge,
     PlexAuthenticationChallengeResponseRequest,
     SourcesApi,
@@ -177,14 +178,34 @@ export class PlexLoginInit extends BaseStage<
         }
 
         try {
-            const redirectChallenge = await aki(SourcesApi).sourcesPlexRedeemTokenCreate({
+            // The generated client parses every answer as a RedirectChallenge
+            // and would drop the fields of any other challenge, so read the
+            // raw answer and parse it the way the flow executor does.
+            const response = await aki(SourcesApi).sourcesPlexRedeemTokenCreateRaw({
                 plexTokenRedeemRequest: {
                     plexToken: token,
                 },
                 slug: this.challenge?.slug || "",
             });
 
-            window.location.assign(redirectChallenge.to);
+            const challenge = ChallengeTypesFromJSON(await response.raw.json());
+
+            if (challenge.component === "xak-flow-redirect") {
+                window.location.assign(challenge.to);
+
+                return;
+            }
+
+            // Access denied, a source without enrollment, a user-matching deny
+            // and a failed policy answer with other challenges and no target.
+            // The flow executor already knows how to render those.
+            if (!this.host) {
+                this.errorMessage = msg("Plex sign-in succeeded, but completing the login failed.");
+
+                return;
+            }
+
+            this.host.challenge = challenge;
         } catch (error: unknown) {
             await showAPIErrorMessage(error);
             this.errorMessage = msg("Plex sign-in succeeded, but completing the login failed.");
