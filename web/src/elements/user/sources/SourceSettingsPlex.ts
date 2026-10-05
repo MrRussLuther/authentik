@@ -53,7 +53,28 @@ export class SourceSettingsPlex extends BaseUserSettings {
         // the time the pin request resolves, and the popup would be blocked.
         const authWindow = popupCenterScreen("about:blank", "plex auth", 550, 700);
         const clientId = this.configureURL || "";
-        const authInfo = await PlexAPIClient.getPin(clientId);
+
+        // Covers a failed pin request as well as a poll that rejects: either
+        // way the popup is not left open on about:blank and the user is told.
+        const reportFailure = async (error: unknown) => {
+            authWindow?.close();
+            const parsedError = await parseAPIResponseError(error);
+
+            showMessage({
+                level: MessageLevel.error,
+                message: msg(str`Failed to connect source: ${pluckErrorDetail(parsedError)}`),
+            });
+        };
+
+        let authInfo: Awaited<ReturnType<typeof PlexAPIClient.getPin>>;
+
+        try {
+            authInfo = await PlexAPIClient.getPin(clientId);
+        } catch (error: unknown) {
+            await reportFailure(error);
+
+            return;
+        }
 
         if (authWindow && !authWindow.closed) {
             authWindow.location.replace(authInfo.authUrl);
@@ -70,17 +91,9 @@ export class SourceSettingsPlex extends BaseUserSettings {
                     slug: this.objectId,
                 });
             })
-            .catch(async (error: unknown) => {
-                // Rejects when the pin expires unauthorized, which is where an
-                // unopened popup ends up too.
-                authWindow?.close();
-                const parsedError = await parseAPIResponseError(error);
-
-                showMessage({
-                    level: MessageLevel.error,
-                    message: msg(str`Failed to connect source: ${pluckErrorDetail(parsedError)}`),
-                });
-            });
+            // Rejects when the pin expires unauthorized, which is where an
+            // unopened popup ends up too.
+            .catch(reportFailure);
 
         this.dispatchEvent(
             new CustomEvent(EVENT_REFRESH, {
